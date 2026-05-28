@@ -8,7 +8,6 @@ RUN npm ci
 COPY tsconfig.json ./
 COPY http.ts ./
 COPY scripts ./scripts
-COPY scraped ./scraped
 RUN npm run build
 
 FROM node:24-slim AS runtime
