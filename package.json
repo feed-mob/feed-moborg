@@ -1,15 +1,17 @@
 {
-  "name": "freewheel-db-mcp",
-  "version": "1.0.0",
+  "name": "feed-moborg-docs-mcp",
   "private": true,
   "type": "module",
-  "description": "Streamable HTTP MCP server for locally built freewheel.db.",
   "scripts": {
-    "build-db": "node scripts/build-db.js",
-    "start": "node src/main.js",
-    "dev": "node --watch src/main.js"
+    "build": "tsc -p tsconfig.json",
+    "build:db": "node --experimental-strip-types scripts/build-db.ts",
+    "start": "node --experimental-sqlite dist/http.js"
   },
-  "engines": {
-    "node": ">=24"
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.1",
+    "typescript": "^6.0.3"
   }
 }

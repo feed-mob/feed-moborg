@@ -1,17 +1,31 @@
-FROM node:24-alpine
+FROM node:24-slim AS build
 
 WORKDIR /app
 
-COPY package.json ./
-COPY src ./src
+COPY package*.json ./
+RUN npm ci
+
+COPY tsconfig.json ./
+COPY http.ts ./
+COPY scripts ./scripts
+COPY scraped ./scraped
+RUN npm run build
+
+FROM node:24-slim AS runtime
+
+WORKDIR /app
+
+COPY package*.json ./
+RUN npm ci --omit=dev
+
+COPY --from=build /app/dist ./dist
+COPY data/db/docs.sqlite ./data/db/docs.sqlite
 
 ENV NODE_ENV=production
-ENV PORT=3000
+ENV AUTH_MODE=none
 ENV HOST=0.0.0.0
-ENV DB_PATH=/app/data/freewheel.db
-ENV MCP_PATH=/mcp
-ENV HEALTH_PATH=/health
+ENV PORT=3000
 
 EXPOSE 3000
 
-CMD ["node", "src/main.js"]
+CMD ["node", "--experimental-sqlite", "dist/http.js"]
