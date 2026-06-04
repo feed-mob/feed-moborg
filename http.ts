@@ -146,7 +146,8 @@ function httpsPostJson(url: string, body: Record<string, string>): Promise<Recor
 // fine because DCR clients re-register automatically and codes are short-lived.
 // ---------------------------------------------------------------------------
 const TOKEN_SECRET = process.env.TOKEN_SECRET || crypto.randomBytes(32).toString('hex');
-const ACCESS_TOKEN_TTL_MS = 8 * 60 * 60 * 1000;
+const ACCESS_TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 1 day
+const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 const AUTH_CODE_TTL_MS = 5 * 60 * 1000;
 const DEVICE_CODE_TTL_MS = 10 * 60 * 1000;
 const DEVICE_POLL_INTERVAL = 5;
@@ -207,7 +208,7 @@ function randomToken(bytes = 32): string {
   return crypto.randomBytes(bytes).toString('base64url');
 }
 
-function signAccessToken(claims: Record<string, unknown>): string {
+function signJwt(claims: Record<string, unknown>, ttlMs: number): string {
   const header = b64url(Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })));
   const now = Math.floor(Date.now() / 1000);
   const body = b64url(
@@ -216,13 +217,29 @@ function signAccessToken(claims: Record<string, unknown>): string {
         iss: BASE_URL,
         aud: BASE_URL,
         iat: now,
-        exp: now + Math.floor(ACCESS_TOKEN_TTL_MS / 1000),
+        exp: now + Math.floor(ttlMs / 1000),
         ...claims,
       })
     )
   );
   const sig = b64url(crypto.createHmac('sha256', TOKEN_SECRET).update(`${header}.${body}`).digest());
   return `${header}.${body}.${sig}`;
+}
+function signAccessToken(claims: Record<string, unknown>): string {
+  return signJwt({ ...claims, token_use: 'access' }, ACCESS_TOKEN_TTL_MS);
+}
+function signRefreshToken(claims: Record<string, unknown>): string {
+  return signJwt({ ...claims, token_use: 'refresh' }, REFRESH_TOKEN_TTL_MS);
+}
+// Issue the standard token response (access + refresh) for a logged-in identity.
+function tokenResponse(identity: { email: string; name: string; scope: string }) {
+  return {
+    access_token: signAccessToken({ sub: identity.email, email: identity.email, name: identity.name, scope: identity.scope }),
+    token_type: 'Bearer',
+    expires_in: Math.floor(ACCESS_TOKEN_TTL_MS / 1000),
+    refresh_token: signRefreshToken({ sub: identity.email, email: identity.email, name: identity.name, scope: identity.scope }),
+    scope: identity.scope,
+  };
 }
 function verifyAccessToken(token: string): Record<string, unknown> | null {
   const parts = token.split('.');
@@ -336,7 +353,8 @@ function requireAuth(
     const claims = verifyAccessToken(token);
     const email = claims && typeof claims.email === 'string' ? claims.email : '';
     const domainOk = !ALLOWED_DOMAIN || email.split('@')[1] === ALLOWED_DOMAIN;
-    if (claims && domainOk) {
+    const isAccess = !claims || claims.token_use !== 'refresh'; // never accept a refresh token here
+    if (claims && domainOk && isAccess) {
       return {
         email,
         name: typeof claims.name === 'string' ? claims.name : email,
@@ -813,7 +831,7 @@ const server = http.createServer(async (req, res) => {
       registration_endpoint: `${BASE_URL}/register`,
       device_authorization_endpoint: `${BASE_URL}/device_authorization`,
       response_types_supported: ['code'],
-      grant_types_supported: ['authorization_code', 'urn:ietf:params:oauth:grant-type:device_code'],
+      grant_types_supported: ['authorization_code', 'urn:ietf:params:oauth:grant-type:device_code', 'refresh_token'],
       code_challenge_methods_supported: ['S256'],
       token_endpoint_auth_methods_supported: ['none', 'client_secret_post'],
       scopes_supported: ['openid', 'email', 'profile', 'mcp'],
@@ -964,13 +982,7 @@ const server = http.createServer(async (req, res) => {
           return;
         }
       }
-      const access_token = signAccessToken({ sub: ac.email, email: ac.email, name: ac.name, scope: ac.scope });
-      sendJson(res, 200, {
-        access_token,
-        token_type: 'Bearer',
-        expires_in: Math.floor(ACCESS_TOKEN_TTL_MS / 1000),
-        scope: ac.scope,
-      });
+      sendJson(res, 200, tokenResponse({ email: ac.email, name: ac.name, scope: ac.scope }));
       return;
     }
 
@@ -982,13 +994,26 @@ const server = http.createServer(async (req, res) => {
       if (da.status === 'denied') { sendJson(res, 400, { error: 'access_denied' }); return; }
       deviceAuths.delete(dc);
       userCodeIndex.delete(da.userCode);
-      const access_token = signAccessToken({ sub: da.email, email: da.email, name: da.name, scope: da.scope });
-      sendJson(res, 200, {
-        access_token,
-        token_type: 'Bearer',
-        expires_in: Math.floor(ACCESS_TOKEN_TTL_MS / 1000),
-        scope: da.scope,
-      });
+      sendJson(res, 200, tokenResponse({ email: da.email ?? '', name: da.name ?? '', scope: da.scope }));
+      return;
+    }
+
+    if (grant === 'refresh_token') {
+      const rt = typeof params['refresh_token'] === 'string' ? params['refresh_token'] : '';
+      const claims = rt ? verifyAccessToken(rt) : null;
+      if (!claims || claims.token_use !== 'refresh') {
+        sendJson(res, 400, { error: 'invalid_grant', error_description: 'invalid or expired refresh_token' });
+        return;
+      }
+      const email = typeof claims.email === 'string' ? claims.email : '';
+      if (ALLOWED_DOMAIN && email.split('@')[1] !== ALLOWED_DOMAIN) {
+        sendJson(res, 400, { error: 'invalid_grant', error_description: 'domain not allowed' });
+        return;
+      }
+      const scope = typeof claims.scope === 'string' ? claims.scope : 'mcp';
+      const name = typeof claims.name === 'string' ? claims.name : email;
+      // Rotate: issue a fresh access token + refresh token.
+      sendJson(res, 200, tokenResponse({ email, name, scope }));
       return;
     }
 
