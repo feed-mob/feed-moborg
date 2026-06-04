@@ -32,6 +32,10 @@ ENV BASE_URL=
 ENV ALLOWED_DOMAIN=
 ENV GOOGLE_CLIENT_ID=
 ENV GOOGLE_CLIENT_SECRET=
+# Secret used to sign issued MCP access tokens (HS256). Set a stable random value
+# in Coolify so tokens survive redeploys; if empty, a random one is generated per
+# boot (clients simply re-authenticate after a restart).
+ENV TOKEN_SECRET=
 
 EXPOSE 3000
 
